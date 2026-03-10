@@ -1,11 +1,19 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogOut, UserPlus } from 'lucide-react';
+import { LogOut, UserPlus, Palette } from 'lucide-react';
 import MessageList from '../components/MessageList';
 import ChatInput from '../components/ChatInput';
 import { getContacts, getMessages, saveMessage, clearSession, addContact } from '../utils/storage';
 import { bridgeApi } from '../api/bridgeApi';
-import { useUIReader } from '../utils/useUIReader';
+import { useAccessibility } from '../utils/useAccessibility';
+
+const THEMES = [
+    { id: 'midnight', label: '🌙 Midnight', color: '#6c5ce7' },
+    { id: 'ocean', label: '🌊 Ocean', color: '#00b4d8' },
+    { id: 'forest', label: '🌲 Forest', color: '#2ecc71' },
+    { id: 'light', label: '☀️ Light', color: '#f5f5f8' },
+    { id: 'high-contrast', label: '♿ High Contrast', color: '#ffdd00' },
+];
 
 const ChatApp = () => {
     const navigate = useNavigate();
@@ -17,8 +25,15 @@ const ChatApp = () => {
     const [activeContact, setActiveContact] = useState(null);
     const [messages, setMessages] = useState([]);
 
-    // UI Tailoring
-    const { speak } = useUIReader(userProfile);
+    // Theme
+    const [showThemePicker, setShowThemePicker] = useState(false);
+    const [currentTheme, setCurrentTheme] = useState(
+        localStorage.getItem('bridge_theme') || 'midnight'
+    );
+    const themePickerRef = useRef(null);
+
+    // Recording ref for blind keyboard shortcuts
+    const chatInputRef = useRef(null);
     const socketRef = useRef(null);
 
     // Filter messages for the active conversation
@@ -27,56 +42,123 @@ const ChatApp = () => {
         (m.sender === activeContact?.name)
     );
 
+    // Accessibility actions for keyboard shortcuts
+    const accessibilityActions = useMemo(() => ({
+        onStartRecording: () => {
+            if (chatInputRef.current?.startVoiceRecording) {
+                chatInputRef.current.startVoiceRecording();
+            }
+        },
+        onStopRecording: () => {
+            if (chatInputRef.current?.stopVoiceRecording) {
+                chatInputRef.current.stopVoiceRecording();
+            }
+        },
+        onReadLastMessage: () => {
+            const received = activeMessages.filter(m => m.sender !== 'me');
+            const last = received[received.length - 1];
+            if (last?.text) {
+                speak(last.text, true);
+            } else {
+                speak('No messages to read', true);
+            }
+        },
+        onReadNewMessages: () => {
+            const received = activeMessages.filter(m => m.sender !== 'me');
+            const last3 = received.slice(-3);
+            if (last3.length === 0) {
+                speak('No new messages', true);
+                return;
+            }
+            const texts = last3.map(m => `${m.sender} said: ${m.text}`).join('. ');
+            speak(texts, true);
+        },
+        onAnnounceContact: () => {
+            if (activeContact) {
+                speak(`Current conversation with ${activeContact.name}`, true);
+            } else {
+                speak('No contact selected', true);
+            }
+        },
+        onPrevContact: () => {
+            if (contacts.length === 0) return;
+            const idx = contacts.findIndex(c => c.id === activeContact?.id);
+            const prev = idx > 0 ? contacts[idx - 1] : contacts[contacts.length - 1];
+            handleSelectContact(prev);
+        },
+        onNextContact: () => {
+            if (contacts.length === 0) return;
+            const idx = contacts.findIndex(c => c.id === activeContact?.id);
+            const next = idx < contacts.length - 1 ? contacts[idx + 1] : contacts[0];
+            handleSelectContact(next);
+        },
+    }), [activeMessages, activeContact, contacts]);
+
+    const { speak } = useAccessibility(userProfile, accessibilityActions);
+
+    // Theme application
+    useEffect(() => {
+        document.documentElement.setAttribute('data-theme', currentTheme);
+        localStorage.setItem('bridge_theme', currentTheme);
+    }, [currentTheme]);
+
+    // Close theme picker on outside click
+    useEffect(() => {
+        const handle = (e) => {
+            if (themePickerRef.current && !themePickerRef.current.contains(e.target)) {
+                setShowThemePicker(false);
+            }
+        };
+        if (showThemePicker) document.addEventListener('mousedown', handle);
+        return () => document.removeEventListener('mousedown', handle);
+    }, [showThemePicker]);
+
     useEffect(() => {
         // Check for active login session
-        const key = sessionStorage.getItem('bridge_auth_key');
+        const token = sessionStorage.getItem('bridge_jwt');
         const user = sessionStorage.getItem('bridge_username');
-        const profile = sessionStorage.getItem('bridge_user_profile');
+        const profile = sessionStorage.getItem('bridge_user_profile') || 'general';
 
-        if (!key) {
+        if (!token) {
             navigate('/login');
             return;
         }
 
-        setSessionKey(key);
+        setSessionKey(token);
         setUsername(user || 'User');
-        setUserProfile(profile || 'General');
+        setUserProfile(profile.charAt(0).toUpperCase() + profile.slice(1));
+
+        // Auto-set high contrast for blind
+        if (profile.toLowerCase() === 'blind') {
+            setCurrentTheme('high-contrast');
+        }
 
         // Load static contacts
         getContacts().then(data => {
             setContacts(data);
-            setActiveContact(data[0]); // Default open first chat
+            setActiveContact(data[0]);
         });
 
         // Load encrypted messages
-        getMessages(key).then(data => {
+        getMessages(token).then(data => {
             setMessages(data);
         });
 
-        // Initialize WebSocket connection for Real-Time Receiving
-        socketRef.current = bridgeApi.connectWebSocket(user, async (incomingData) => {
-            // Note: In real E2E, the key is shared. Here we use our session key for local demo decrypting 
-            // OR if it's sent from another instance, we'd need a shared key. 
-            // For simplicity in this local demo, if both users type the same "Secret", the key matches!
-
-            // Re-format the incoming raw socket data into our app's message shape
+        // Initialize WebSocket connection (JWT-authenticated)
+        socketRef.current = bridgeApi.connectWebSocket(async (incomingData) => {
             const incomingMessage = {
-                sender: incomingData.from,
-                to: user, // sent to me
-                text: incomingData.payload, // The encrypted blob
+                sender: incomingData.sender_username || incomingData.from,
+                to: user,
+                text: incomingData.payload,
                 timestamp: Date.now()
             };
 
-            // Save to my local indexDB using my encryption key 
-            // (If the sender used the *same* secret, this will decrypt properly on my end later!)
-            await saveMessage(incomingMessage, key);
-
-            // Fetch the updated, decrypted list of messages to trigger UI re-render
-            const updatedMessages = await getMessages(key);
+            await saveMessage(incomingMessage, token);
+            const updatedMessages = await getMessages(token);
             setMessages(updatedMessages);
 
-            // Blind Profile Accessibility: Speak incoming message
-            speak(`New message from ${incomingData.from}`);
+            // Blind: auto-speak incoming
+            speak(`New message from ${incomingMessage.sender}`);
         });
 
         return () => {
@@ -86,55 +168,51 @@ const ChatApp = () => {
 
     const handleLogout = () => {
         clearSession();
+        sessionStorage.removeItem('bridge_jwt');
+        sessionStorage.removeItem('bridge_user_id');
+        sessionStorage.removeItem('bridge_username');
+        sessionStorage.removeItem('bridge_user_profile');
         navigate('/login');
     };
 
     const handleSendMessage = async (msgObj) => {
-        // Tag with the intended recipient
         const fullMsg = { ...msgObj, to: activeContact?.name };
 
-        // Save to my own local history (unencrypted state is passed, `saveMessage` encrypts it)
         await saveMessage(fullMsg, sessionKey);
-
-        // Optimistically update UI
         const updatedMessages = await getMessages(sessionKey);
         setMessages(updatedMessages);
 
-        // Emit through WebSocket to the recipient
+        // Emit through WebSocket
         if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-            // Re-fetch the message to get its AES Encrypted form before sending over the wire
-            const dbMsgs = await getMessages(sessionKey);
-            const myEncryptedText = dbMsgs[dbMsgs.length - 1].rawEncryptedText || fullMsg.text;
-
-            // Alternatively, encrypt specifically for the wire:
             import('../utils/crypto').then(({ encryptMessage }) => {
                 const wireCipher = encryptMessage(fullMsg.text, sessionKey);
                 socketRef.current.send(JSON.stringify({
-                    to: activeContact.name,
+                    type: 'message',
+                    conversation_id: activeContact?.id || 'default',
                     payload: wireCipher
                 }));
             });
         }
 
-        // --- MOCK BOT SIMULATION FOR TESTING ---
+        // Mock bot
         if (activeContact?.name === 'Bridge AI Assistant') {
             setTimeout(async () => {
                 const replyMsg = {
                     sender: 'Bridge AI Assistant',
                     to: username,
-                    text: "Hi i am bridge.",
+                    text: "Hi, I am Bridge — your accessible AI assistant.",
                     timestamp: Date.now()
                 };
                 await saveMessage(replyMsg, sessionKey);
                 const newMessages = await getMessages(sessionKey);
                 setMessages(newMessages);
                 speak("New message from Bridge AI Assistant");
-            }, 1000); // 1-second delay for realism
+            }, 1000);
         }
     };
 
     const handleAddContact = async () => {
-        const name = prompt("Enter the exact Username of the contact you want to add:");
+        const name = prompt("Enter the exact Username of the contact:");
         if (name && name.trim()) {
             const newC = await addContact(name.trim());
             setContacts(prev => [...prev, newC]);
@@ -143,38 +221,34 @@ const ChatApp = () => {
         }
     };
 
-    const handleSelectContact = (c) => {
+    const handleSelectContact = useCallback((c) => {
         setActiveContact(c);
         speak(`Selected conversation with ${c.name}`);
-    };
+    }, [speak]);
 
     const handleAddTranslation = async (originalMsg, type, url) => {
         const translatedMsg = {
             sender: originalMsg.sender,
             to: username,
-            text: '', // Blank text for media-only messages
+            text: '',
             mediaUrl: url,
             mediaType: type,
             timestamp: Date.now()
         };
         await saveMessage(translatedMsg, sessionKey);
-
         const updatedMessages = await getMessages(sessionKey);
         setMessages(updatedMessages);
 
-        if (type === 'audio') {
-            speak(`Audio translation ready`);
-        } else if (type === 'video') {
-            speak(`Sign video ready`);
-        }
+        if (type === 'audio') speak('Audio translation ready');
+        else if (type === 'video') speak('Sign video ready');
     };
 
-    if (!sessionKey) return null; // Wait for redirect if not logged in
+    if (!sessionKey) return null;
 
     return (
-        <div className="chat-layout">
+        <div className="chat-layout page-enter">
 
-            {/* Sidebar Contacts List */}
+            {/* Sidebar */}
             <div className="chat-sidebar">
                 <div className="chat-sidebar-header">
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -190,9 +264,45 @@ const ChatApp = () => {
                                 <span className="text-secondary" style={{ fontSize: '0.75rem' }}>Online</span>
                             </div>
                         </div>
-                        <button className="action-btn" onClick={handleLogout} title="Log Out">
-                            <LogOut size={18} />
-                        </button>
+
+                        <div style={{ display: 'flex', gap: '0.25rem' }}>
+                            {/* Theme Picker */}
+                            <div style={{ position: 'relative' }} ref={themePickerRef}>
+                                <button
+                                    className="theme-picker-btn"
+                                    onClick={() => setShowThemePicker(p => !p)}
+                                    title="Change Theme"
+                                    aria-label="Change theme"
+                                >
+                                    <Palette size={18} />
+                                </button>
+
+                                {showThemePicker && (
+                                    <div className="theme-dropdown">
+                                        {THEMES.map(t => (
+                                            <button
+                                                key={t.id}
+                                                className={`theme-option ${currentTheme === t.id ? 'active' : ''}`}
+                                                onClick={() => {
+                                                    setCurrentTheme(t.id);
+                                                    setShowThemePicker(false);
+                                                }}
+                                            >
+                                                <div
+                                                    className="theme-swatch"
+                                                    style={{ background: t.color }}
+                                                />
+                                                <span>{t.label}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <button className="action-btn" onClick={handleLogout} title="Log Out" aria-label="Log out">
+                                <LogOut size={18} />
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -201,6 +311,7 @@ const ChatApp = () => {
                         className="btn btn-primary"
                         style={{ width: '100%', marginBottom: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
                         onClick={handleAddContact}
+                        aria-label="Add a new contact"
                     >
                         <UserPlus size={16} /> Add Contact
                     </button>
@@ -210,6 +321,10 @@ const ChatApp = () => {
                             key={c.id}
                             className={`contact-item ${activeContact?.id === c.id ? 'active' : ''}`}
                             onClick={() => handleSelectContact(c)}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Chat with ${c.name}`}
+                            onKeyDown={(e) => e.key === 'Enter' && handleSelectContact(c)}
                         >
                             <div className="contact-avatar">{c.avatar}</div>
                             <div className="contact-info">
@@ -219,9 +334,19 @@ const ChatApp = () => {
                         </div>
                     ))}
                 </div>
+
+                {/* Keyboard shortcuts bar for Blind */}
+                {userProfile === 'Blind' && (
+                    <div className="shortcuts-bar" aria-label="Keyboard shortcuts">
+                        <span className="shortcut-tag"><kbd>Alt+M</kbd> Mic</span>
+                        <span className="shortcut-tag"><kbd>Alt+S</kbd> Send</span>
+                        <span className="shortcut-tag"><kbd>Alt+R</kbd> Read</span>
+                        <span className="shortcut-tag"><kbd>Alt+↑↓</kbd> Nav</span>
+                    </div>
+                )}
             </div>
 
-            {/* Main Chat Canvas */}
+            {/* Main Chat */}
             <div className="chat-main">
                 {activeContact ? (
                     <>
@@ -231,14 +356,22 @@ const ChatApp = () => {
                             </div>
                             <div className="contact-info">
                                 <h4>{activeContact.name}</h4>
-                                <p className="text-secondary" style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                    End-to-End Encrypted via Local Environment
+                                <p className="text-secondary" style={{ fontSize: '0.8rem' }}>
+                                    End-to-End Encrypted · {userProfile} Mode
                                 </p>
                             </div>
                         </header>
 
-                        <MessageList messages={activeMessages} userProfile={userProfile} onTranslate={handleAddTranslation} />
-                        <ChatInput onSendMessage={handleSendMessage} userProfile={userProfile} />
+                        <MessageList
+                            messages={activeMessages}
+                            userProfile={userProfile}
+                            onTranslate={handleAddTranslation}
+                        />
+                        <ChatInput
+                            ref={chatInputRef}
+                            onSendMessage={handleSendMessage}
+                            userProfile={userProfile}
+                        />
                     </>
                 ) : (
                     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -246,7 +379,6 @@ const ChatApp = () => {
                     </div>
                 )}
             </div>
-
         </div>
     );
 };

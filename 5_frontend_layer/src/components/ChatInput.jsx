@@ -1,14 +1,14 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { Send, Mic, Video as VideoIcon, Square, X, Upload, Camera } from 'lucide-react';
 import { bridgeApi } from '../api/bridgeApi';
 
-const ChatInput = ({ onSendMessage, userProfile }) => {
+const ChatInput = forwardRef(({ onSendMessage, userProfile }, ref) => {
     const [text, setText] = useState('');
     const [loading, setLoading] = useState(false);
 
     // Media Recording State
     const [isRecording, setIsRecording] = useState(false);
-    const [recordingType, setRecordingType] = useState(null); // 'audio' or 'video'
+    const [recordingType, setRecordingType] = useState(null);
     const [recordingTime, setRecordingTime] = useState(0);
     const [showVideoOptions, setShowVideoOptions] = useState(false);
 
@@ -20,20 +20,23 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
     const fileInputRef = useRef(null);
     const videoOptionsRef = useRef(null);
 
+    // Expose methods for blind keyboard shortcuts
+    useImperativeHandle(ref, () => ({
+        startVoiceRecording: () => startRecording('audio'),
+        stopVoiceRecording: () => stopRecording(),
+    }));
+
     useEffect(() => {
-        return () => stopMediaTracks(); // Cleanup on unmount
+        return () => stopMediaTracks();
     }, []);
 
-    // Close popup when clicking outside
     useEffect(() => {
         const handleClickOutside = (e) => {
             if (videoOptionsRef.current && !videoOptionsRef.current.contains(e.target)) {
                 setShowVideoOptions(false);
             }
         };
-        if (showVideoOptions) {
-            document.addEventListener('mousedown', handleClickOutside);
-        }
+        if (showVideoOptions) document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [showVideoOptions]);
 
@@ -60,7 +63,6 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
             mediaStreamRef.current = stream;
 
-            // Ensure live preview for video
             if (type === 'video' && liveVideoRef.current) {
                 liveVideoRef.current.srcObject = stream;
             }
@@ -87,7 +89,6 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
             timerRef.current = setInterval(() => {
                 setRecordingTime(prev => prev + 1);
             }, 1000);
-
         } catch (err) {
             console.error("Camera/Mic access denied", err);
             alert('Could not access Camera/Microphone. Please check permissions.');
@@ -103,7 +104,6 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
 
     const cancelRecording = () => {
         if (mediaRecorderRef.current && isRecording) {
-            // Prevent the onstop event from sending the file
             mediaRecorderRef.current.onstop = () => { stopMediaTracks(); };
             mediaRecorderRef.current.stop();
             setIsRecording(false);
@@ -115,8 +115,7 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
         setLoading(true);
         setRecordingType(null);
         try {
-            const ext = type === 'video' ? 'webm' : 'webm';
-            const file = new File([blob], `recording.${ext}`, { type: blob.type });
+            const file = new File([blob], `recording.webm`, { type: blob.type });
 
             if (type === 'audio') {
                 const response = await bridgeApi.speechToText(file);
@@ -147,21 +146,18 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
         }
     };
 
-    // Handle file upload for sign language video
     const handleVideoUpload = async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
-
-        // Reset input so the same file can be re-selected
         e.target.value = '';
 
         const ext = file.name.split('.').pop().toLowerCase();
         if (!['mp4', 'webm', 'avi'].includes(ext)) {
-            alert('Unsupported format. Please upload an .mp4, .webm, or .avi file.');
+            alert('Unsupported format. Please upload .mp4, .webm, or .avi');
             return;
         }
         if (file.size > 100 * 1024 * 1024) {
-            alert('File too large. Maximum size is 100MB.');
+            alert('File too large. Maximum 100MB.');
             return;
         }
 
@@ -180,13 +176,12 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
             }
         } catch (err) {
             console.error(err);
-            alert('Sign language processing failed. Is the API running on port 8006?');
+            alert('Sign language processing failed.');
         } finally {
             setLoading(false);
         }
     };
 
-    // Normal Text Chat
     const handleSendText = () => {
         if (!text.trim()) return;
         onSendMessage({
@@ -204,14 +199,15 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
         }
     };
 
-    // Determine which input options to emphasize based on Profile
+    // Role-based input visibility
     const showAudioInput = userProfile === 'General' || userProfile === 'Blind';
-    const showVideoInput = userProfile === 'Deaf' || userProfile === 'Mute';
+    const showVideoInput = userProfile === 'Deaf' || userProfile === 'Mute' || userProfile === 'General';
+    const isMuteMode = userProfile === 'Mute';
 
     return (
         <div className="chat-input-area" style={{ position: 'relative' }}>
 
-            {/* Live Video Preview Overlay (Only shows when recording video) */}
+            {/* Live Video Preview */}
             {isRecording && recordingType === 'video' && (
                 <div style={{ position: 'absolute', bottom: 'calc(100% + 10px)', left: '2rem', zIndex: 10 }}>
                     <video
@@ -223,8 +219,39 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
                 </div>
             )}
 
+            {/* Mute Mode: Large Record Button (above input) */}
+            {isMuteMode && !isRecording && (
+                <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                    <button
+                        className="mute-record-btn"
+                        onClick={() => startRecording('video')}
+                        disabled={loading}
+                        aria-label="Record sign language video"
+                    >
+                        <Camera size={20} />
+                        <span>Record Sign Language</span>
+                    </button>
+                    <button
+                        className="mute-record-btn"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={loading}
+                        aria-label="Upload sign language video"
+                        style={{ opacity: 0.8 }}
+                    >
+                        <Upload size={18} />
+                        <span>Upload Video</span>
+                    </button>
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".mp4,.webm,.avi"
+                        style={{ display: 'none' }}
+                        onChange={handleVideoUpload}
+                    />
+                </div>
+            )}
+
             <div className="chat-input-container">
-                {/* Render Recording Controls OR Standard Text Inputs */}
                 {isRecording ? (
                     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 1rem', minHeight: '48px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
@@ -234,94 +261,87 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
                             </span>
                         </div>
                         <div style={{ display: 'flex', gap: '0.5rem' }}>
-                            <button title="Cancel" type="button" className="action-btn" onClick={cancelRecording} style={{ color: 'var(--text-secondary)' }}>
+                            <button title="Cancel" type="button" className="action-btn" onClick={cancelRecording} aria-label="Cancel recording">
                                 <X size={20} />
                             </button>
-                            <button title="Stop & Send" type="button" className="action-btn primary" onClick={stopRecording} style={{ backgroundColor: 'var(--error)' }}>
+                            <button title="Stop & Send" type="button" className="action-btn primary" onClick={stopRecording} style={{ backgroundColor: 'var(--error)' }} aria-label="Stop recording and send">
                                 <Square size={16} fill="currentColor" />
                             </button>
                         </div>
                     </div>
                 ) : (
                     <>
-                        {/* Attachment Actions */}
+                        {/* Action Buttons */}
                         <div className="action-buttons">
                             {showAudioInput && (
                                 <button
                                     type="button"
-                                    title="Record Voice Message (Speech to Text)"
+                                    title="Record Voice (Alt+M for Blind)"
                                     className={`action-btn ${loading ? 'pulse' : ''}`}
                                     onClick={() => startRecording('audio')}
                                     disabled={loading}
-                                    style={{ background: userProfile === 'Blind' ? 'rgba(108, 92, 231, 0.2)' : 'transparent' }}
+                                    aria-label="Record voice message"
+                                    style={{ background: userProfile === 'Blind' ? 'rgba(var(--glow-rgb), 0.2)' : 'transparent' }}
                                 >
                                     <Mic size={20} />
                                 </button>
                             )}
 
-                            {showVideoInput && (
+                            {showVideoInput && !isMuteMode && (
                                 <div style={{ position: 'relative' }} ref={videoOptionsRef}>
                                     <button
                                         type="button"
-                                        title="Sign Language Video (Upload or Record)"
+                                        title="Sign Language Video"
                                         className={`action-btn ${loading ? 'pulse' : ''}`}
                                         onClick={() => setShowVideoOptions(prev => !prev)}
                                         disabled={loading}
-                                        style={{ background: userProfile === 'Mute' ? 'rgba(108, 92, 231, 0.2)' : 'transparent' }}
+                                        aria-label="Sign language video options"
                                     >
                                         <VideoIcon size={20} />
                                     </button>
 
                                     {showVideoOptions && (
                                         <div className="video-options-popup">
-                                            <button
-                                                type="button"
-                                                className="video-option-item"
-                                                onClick={() => {
-                                                    setShowVideoOptions(false);
-                                                    fileInputRef.current?.click();
-                                                }}
-                                            >
-                                                <Upload size={18} />
-                                                <span>Upload Video</span>
+                                            <button type="button" className="video-option-item" onClick={() => { setShowVideoOptions(false); fileInputRef.current?.click(); }}>
+                                                <Upload size={18} /><span>Upload Video</span>
                                             </button>
-                                            <button
-                                                type="button"
-                                                className="video-option-item"
-                                                onClick={() => {
-                                                    setShowVideoOptions(false);
-                                                    startRecording('video');
-                                                }}
-                                            >
-                                                <Camera size={18} />
-                                                <span>Record Video</span>
+                                            <button type="button" className="video-option-item" onClick={() => { setShowVideoOptions(false); startRecording('video'); }}>
+                                                <Camera size={18} /><span>Record Video</span>
                                             </button>
                                         </div>
                                     )}
 
-                                    <input
-                                        ref={fileInputRef}
-                                        type="file"
-                                        accept=".mp4,.webm,.avi"
-                                        style={{ display: 'none' }}
-                                        onChange={handleVideoUpload}
-                                    />
+                                    {!isMuteMode && (
+                                        <input
+                                            ref={fileInputRef}
+                                            type="file"
+                                            accept=".mp4,.webm,.avi"
+                                            style={{ display: 'none' }}
+                                            onChange={handleVideoUpload}
+                                        />
+                                    )}
                                 </div>
                             )}
                         </div>
 
                         <textarea
-                            placeholder={loading ? "Translating input to Pivot Text..." : "Type a message..."}
+                            placeholder={
+                                loading ? "Processing..."
+                                    : isMuteMode ? "Type a message or use buttons above to sign..."
+                                        : userProfile === 'Blind' ? "Type a message (Alt+M for voice)..."
+                                            : "Type a message..."
+                            }
                             value={text}
                             onChange={(e) => setText(e.target.value)}
                             onKeyDown={handleKeyDown}
                             disabled={loading}
                             rows={1}
+                            aria-label="Message input"
                         />
 
                         <div className="action-buttons">
                             {text.trim() ? (
-                                <button title="Send Standard Text" type="button" className="action-btn primary" onClick={handleSendText} disabled={loading}>
+                                <button title="Send" type="button" className="action-btn primary" onClick={handleSendText} disabled={loading} aria-label="Send message">
                                     <Send size={18} />
                                 </button>
                             ) : (
@@ -333,6 +353,8 @@ const ChatInput = ({ onSendMessage, userProfile }) => {
             </div>
         </div>
     );
-};
+});
+
+ChatInput.displayName = 'ChatInput';
 
 export default ChatInput;
